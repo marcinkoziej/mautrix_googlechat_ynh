@@ -1,0 +1,229 @@
+#!/bin/bash
+
+#=================================================
+# GENERIC START
+#=================================================
+# IMPORT GENERIC HELPERS
+#=================================================
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+#=================================================
+# MANAGE SCRIPT FAILURE
+#=================================================
+
+ynh_clean_setup () {
+	### Remove this function if there's nothing to clean before calling the remove script.
+	true
+}
+# Exit if an error occurs during the execution of the script
+ynh_abort_if_errors
+
+#=================================================
+# RETRIEVE ARGUMENTS FROM THE MANIFEST
+#=================================================
+
+botname=$YNH_APP_ARG_BOTNAME
+bot_synapse_adm=true
+#encryption=$YNH_APP_ARG_ENCRYPTION
+encryption=false
+botadmin=$YNH_APP_ARG_BOTADMIN
+botusers=$YNH_APP_ARG_BOTUSERS
+if [ "$botusers" == "admin" ]
+then
+	botusers=$botadmin
+fi
+synapsenumber=$YNH_APP_ARG_SYNAPSENUMBER
+# ToDo check (in manifest?) if the selected synapse instance is not already connected to a mautrix_bridge bridge
+if [ $synapsenumber -eq "1" ]
+then
+synapse_instance="synapse"
+else
+synapse_instance="synapse__$synapsenumber"
+fi
+server_name=$(ynh_app_setting_get --app $synapse_instance --key server_name)
+domain=$(ynh_app_setting_get --app $synapse_instance --key domain)
+
+mautrix_version=$(ynh_app_upstream_version)
+app=$YNH_APP_INSTANCE_NAME
+
+#=================================================
+# CHECK IF THE APP CAN BE INSTALLED WITH THESE ARGS
+#=================================================
+ynh_script_progression --message="Validating installation parameters..." --weight=1
+
+final_path=/opt/yunohost/$app
+test ! -e "$final_path" || ynh_die --message="This path already contains a folder"
+ynh_app_setting_set --app=$app --key=final_path --value=$final_path
+
+#=================================================
+# SET CONSTANTS
+#=================================================
+
+enable_relaybot=true
+bot_synapse_db_user="@$botname:$server_name"
+synapse_db_name="matrix_$synapse_instance"
+
+#=================================================
+# STORE SETTINGS FROM MANIFEST
+#=================================================
+ynh_script_progression --message="Storing installation settings..." --weight=7
+
+ynh_app_setting_set --app=$app --key=domain --value=$domain
+ynh_app_setting_set --app=$app --key=server_name --value=$server_name
+ynh_app_setting_set --app=$app --key=botname --value=$botname
+ynh_app_setting_set --app=$app --key=synapse_instance --value=$synapse_instance
+ynh_app_setting_set --app=$app --key=bot_synapse_adm --value=$bot_synapse_adm
+ynh_app_setting_set --app=$app --key=encryption --value=$encryption
+ynh_app_setting_set --app=$app --key=botadmin --value=$botadmin
+ynh_app_setting_set --app=$app --key=botusers --value=$botusers
+ynh_app_setting_set --app=$app --key=mautrix_version --value=$mautrix_version
+
+#=================================================
+# STANDARD MODIFICATIONS
+#=================================================
+# FIND AND OPEN A PORT
+#=================================================
+ynh_script_progression --message="Finding an available port..." --weight=1
+
+# Find a free port for communication between your local synapse instance (home server) and its app service mautrix_bridge.
+port=$(ynh_find_port --port=8449)
+ynh_app_setting_set --app=$app --key=port --value=$port
+
+#=================================================
+# INSTALL DEPENDENCIES
+#=================================================
+ynh_script_progression --message="Installing dependencies..." --weight=10
+
+ynh_exec_warn_less ynh_install_app_dependencies $pkg_dependencies
+
+ynh_install_extra_app_dependencies --repo="http://http.debian.net/debian buster-backports main" --package="libolm-dev" --key="https://keyserver.ubuntu.com/pks/lookup?search=0x0E98404D386FA1D9&op=get"
+
+#sleep 3
+
+#=================================================
+# CREATE DEDICATED USER
+#=================================================
+ynh_script_progression --message="Configuring system user..." --weight=1
+
+#=================================================
+# CREATE A POSTGRESQL DATABASE
+#=================================================
+ynh_script_progression --message="Creating a PostgreSQL database..." --weight=3
+
+db_name=$(ynh_sanitize_dbid --db_name=$app)
+ynh_app_setting_set --app=$app --key=db_name --value=$db_name
+db_pwd=$(ynh_string_random --length=30)
+ynh_app_setting_set --app=$app --key=db_pwd --value=$db_pwd
+ynh_psql_test_if_first_run
+ynh_psql_setup_db --db_user=$db_name --db_name=$db_name --db_pwd=$db_pwd
+
+#=================================================
+# DOWNLOAD, CHECK AND UNPACK SOURCE
+#=================================================
+ynh_script_progression --message="Setting up source files..." --weight=3
+
+# Download, check integrity, uncompress and patch the source from app.src
+ynh_setup_source --dest_dir="$final_path/src"
+chmod 750 "$final_path"
+chown $app:$app "$final_path"
+
+#=================================================
+# ADD A CONFIGURATION
+#=================================================
+ynh_script_progression --message="Configuring Mautrix Bridge..." --weight=2
+
+# https://docs.python.org/3.6/library/logging.html#logging-levels
+log_level="INFO"
+
+ynh_add_config --template="../conf/config.yaml" --destination="$final_path/config.yaml"
+chmod -R 750 "$final_path"
+chown -R $app:$app "$final_path"
+
+#=================================================
+# SETUP SYSTEMD
+#=================================================
+ynh_script_progression --message="Configuring a systemd service..." --weight=3
+
+# Create a dedicated systemd config
+ynh_add_systemd_config
+
+#=================================================
+# INSTALL MAUTRIX-BRIDGE PYTHON MODULE
+#=================================================
+ynh_script_progression --message="Configuring python3 virtual environment" --weight=6
+
+mkdir -p /var/log/$app
+# Configure Mautrix-Bridge
+python3 -m venv $final_path
+export HOME=$final_path
+$final_path/bin/pip3 install --upgrade pip setuptools wheel
+
+ynh_script_progression --message="Installing Bridge with pip" --weight=6
+
+# Pre-compiled python-olm to avoid libolm-dev, python3-dev -> does not work for arm
+#$final_path/bin/pip3 install --upgrade python-olm --extra-index-url https://gitlab.matrix.org/api/v4/projects/27/packages/pypi/simple
+# Build with libolm3 end-to-bridge encryption
+$final_path/bin/pip3 install $final_path/src/mautrix-googlechat.tar.gz[metrics,e2be,formattednumbers,qrlink,stickers]
+
+#=================================================
+# REGISTER SYNAPSE APP-SERVICE
+#=================================================
+
+$final_path/bin/python3 -m mautrix_googlechat -g -c $final_path/config.yaml -r /etc/matrix-$synapse_instance/app-service/$app.yaml
+
+/opt/yunohost/matrix-$synapse_instance/update_synapse_for_appservice.sh \
+    || ynh_die "Synapse can't restart with the appservice configuration"
+
+#=================================================
+# STORE THE CONFIG FILE CHECKSUM
+#=================================================
+
+# Calculate and store the config file checksum into the app settings
+ynh_store_file_checksum --file="/etc/matrix-$synapse_instance/app-service/$app.yaml"
+ynh_store_file_checksum --file="$final_path/config.yaml"
+
+#=================================================
+# GENERIC FINALIZATION
+#=================================================
+# SETUP LOGROTATE
+#=================================================
+ynh_script_progression --message="Configuring log rotation..." --weight=3
+
+# Use logrotate to manage application logfile(s)
+ynh_use_logrotate
+chmod -R 600 "/var/log/$app"
+chmod 700 "/var/log/$app"
+chown -R $app:$app /var/log/$app
+
+#=================================================
+# ADVERTISE SERVICE IN ADMIN PANEL
+#=================================================
+ynh_script_progression --message="Integrating service in YunoHost..." --weight=1
+yunohost service add $app --description="Bridging Google Chat and Matrix messages" --log=/var/log/$app/$app.log
+
+#=================================================
+# START SYSTEMD SERVICE
+#=================================================
+ynh_script_progression --message="Starting a systemd service..." --weight=2
+
+# Start a systemd service
+sleep 2
+chown -R $app:$app "$final_path"
+ynh_systemd_action --service_name=$app --action="start" --log_path="/var/log/$app/$app.log"
+## Wait until the synapse user is created
+#sleep 30
+#   # (Note that, by default, non-admins might not have your homeserver's permission to create communities.)
+#   if [ "$bot_synapse_adm" = true ]
+#   then
+#    ynh_psql_execute_as_root --database=$synapse_db_name --sql="UPDATE users SET admin = 1 WHERE name = ""$botname"";"
+#    #yunohost app action run $synapse_instance set_admin_user -a username=$botname
+#   fi
+#ynh_systemd_action --service_name=$app --action="restart"
+
+#=================================================
+# END OF SCRIPT
+#=================================================
+
+ynh_script_progression --message="Installation of $app completed" --last
