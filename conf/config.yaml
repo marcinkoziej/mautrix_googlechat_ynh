@@ -16,8 +16,6 @@ homeserver:
     status_endpoint: null
     # Endpoint for reporting per-message status.
     message_send_checkpoint_endpoint: null
-    # Maximum number of simultaneous HTTP connections to the homeserver.
-    connection_limit: 100
     
 # Application service host/registration related details
 # Changing these values requires regeneration of the registration.
@@ -35,16 +33,10 @@ appservice:
     # Usually 1 is enough, but on high-traffic bridges you might need to increase this to avoid 413s
     max_body_size: 1
 
-    # The full URI to the database. SQLite and Postgres are supported.
-    # However, SQLite support is extremely experimental and should not be used.
-    # Format examples:
-    #   SQLite:   sqlite:///filename.db
-    #   Postgres: postgres://username:password@hostname/dbname
+    # The full URI to the database. Only Postgres is currently supported.
     database: postgres://__APP__:__DB_PWD__@localhost:5432/__DB_NAME__
-    # Additional arguments for asyncpg.create_pool() or sqlite3.connect()
+    # Additional arguments for asyncpg.create_pool() 
     # https://magicstack.github.io/asyncpg/current/api/index.html#asyncpg.pool.create_pool
-    # https://docs.python.org/3/library/sqlite3.html#sqlite3.connect
-    # For sqlite, min_size is used as the connection thread pool size and max_size is ignored.
     database_opts:
         min_size: 5
         max_size: 10
@@ -56,7 +48,7 @@ appservice:
     # Display name and avatar for bot. Set to "remove" to remove display name/avatar, leave empty
     # to leave display name/avatar as-is.
     bot_displayname: Google Chat bridge bot
-    bot_avatar: mxc://maunium.net/wPJgTQbZOtpBFmDNkiNEMDUp
+    bot_avatar: mxc://maunium.net/BDIWAQcbpPGASPUUBuEGWXnQ
 
     # Whether or not to receive ephemeral events via appservice transactions.
     # Requires MSC2409 support (i.e. Synapse 1.22+).
@@ -67,7 +59,12 @@ appservice:
     as_token: "This value is generated when generating the registration"
     hs_token: "This value is generated when generating the registration"
 
-# Prometheus telemetry config. Requires prometheus-client to be installed.
+hangouts:
+    # Device name shown in Google account settings
+    # (probably doesn't actually work anymore)
+    device_name: Mautrix-Google Chat bridge
+
+    # Prometheus telemetry config. Requires prometheus-client to be installed.
 metrics:
     enabled: false
     listen_port: 8000
@@ -83,53 +80,36 @@ manhole:
     whitelist:
     - 0
 
-googlechat:
-    # Whether or not message attachments should be removed from disk after they're bridged.
-    remove_file_after_handling: true
-    # Whether or not users can register a primary device
-    registration_enabled: true
-    # Whether or not to enable disappearing messages in groups. If enabled, then the expiration
-    # time of the messages will be determined by the first users to read the message, rather
-    # than individually. If the bridge has a single user, this can be turned on safely.
-    enable_disappearing_messages_in_groups: false
-    
 # Bridge config
 bridge:
     # Localpart template of MXIDs for Google Chat users.
-    # {userid} is replaced with an identifier for the Google Chat user.
-    username_template: "sg_{userid}"
+    # {userid} is replaced with the user ID of the Google Chat user.
+    username_template: "googlechat_{userid}"
     # Displayname template for Google Chat users.
-    # {displayname} is replaced with the displayname of the Google Chat user, which is the first
-    # available variable in displayname_preference. The variables in displayname_preference
-    # can also be used here directly.
-    displayname_template: "{displayname} (SG)"
-    # Whether or not contact list displaynames should be used.
-    # Possible values: disallow, allow, prefer
-    #
-    # Multi-user instances are recommended to disallow contact list names, as otherwise there can
-    # be conflicts between names from different users' contact lists.
-    contact_list_names: disallow
-    # Available variables: full_name, first_name, last_name, phone, uuid
-    displayname_preference:
-    - full_name
-    - phone
+    # {full_name}, {first_name}, {last_name} and {email} are replaced with names.
+    displayname_template: "{full_name} (Google Chat)"
 
-    # Whether or not to create portals for all groups on login/connect.
-    autocreate_group_portal: true
-    # Whether or not to create portals for all contacts on login/connect.
-    autocreate_contact_portal: false
-    # Whether or not to use /sync to get read receipts and typing notifications
+    # The prefix for commands. Only required in non-management rooms.
+    command_prefix: "!gc"
+
+    # Number of chats to sync (and create portals for) on startup/login.
+    # Set 0 to disable automatic syncing.
+    initial_chat_sync: 10
+    # Whether or not the Google Chat users of logged in Matrix users should be
+    # invited to private chats when the user sends a message from another client.
+    invite_own_puppet_to_pm: false
+    # Whether or not to use /sync to get presence, read receipts and typing notifications
     # when double puppeting is enabled
     sync_with_custom_puppets: true
     # Whether or not to update the m.direct account data event when double puppeting is enabled.
     # Note that updating the m.direct event is not atomic (except with mautrix-asmux)
     # and is therefore prone to race conditions.
     sync_direct_chat_list: false
-    # Allow using double puppeting from any server with a valid client .well-known file.
-    double_puppet_allow_discovery: false
-    # Servers to allow double puppeting from, even if double_puppet_allow_discovery is false.
+    # Servers to always allow double puppeting from
     double_puppet_server_map:
         example.com: https://example.com
+    # Allow using double puppeting from any server with a valid client .well-known file.
+    double_puppet_allow_discovery: false
     # Shared secret for https://github.com/devture/matrix-synapse-shared-secret-auth
     #
     # If set, custom puppets will be enabled automatically for local users
@@ -138,13 +118,15 @@ bridge:
     # If using this for other servers than the bridge's server,
     # you must also set the URL in the double_puppet_server_map.
     login_shared_secret_map:
-        example.com: foo
-    # Whether or not created rooms should have federation enabled.
-    # If false, created portal rooms will never be federated.
-    federate_rooms: true
-    # End-to-bridge encryption support options. You must install the e2be optional dependency for
-    # this to work. See https://docs.mau.fi/bridges/general/end-to-bridge-encryption.html
-    encryption:
+        example.com: foobar
+    # Whether or not to update avatars when syncing all contacts at startup.
+    update_avatar_initial_sync: true
+    # End-to-bridge encryption support options. These require matrix-nio to be installed with pip
+    # and login_shared_secret to be configured in order to get a device for the bridge bot.
+    #
+    # Additionally, https://github.com/matrix-org/synapse/pull/5758 is required if using a normal
+    # application service.
+        encryption:
         # Allow encryption, work in group chat rooms with e2ee enabled
         allow: __ENCRYPTION__
         # Default to encryption, force-enable encryption in all portals the bridge creates
@@ -162,55 +144,59 @@ bridge:
             # Require devices to be verified by the bridge?
             # Verification by the bridge is not yet implemented.
             require_verification: true
-    # Whether or not to explicitly set the avatar and room name for private
-    # chat portal rooms. This will be implicitly enabled if encryption.default is true.
-    private_chat_portal_meta: false
     # Whether or not the bridge should send a read receipt from the bridge bot when a message has
-    # been sent to Google Chat. This let's you check manually whether the bridge is receiving your
-    # messages.
-    # Note that this is not related to Google Chat delivery receipts.
+    # been sent to Google Chat.
     delivery_receipts: false
-    # Whether or not delivery errors should be reported as messages in the Matrix room. (not yet implemented)
-    delivery_error_reports: false
+    # Whether or not created rooms should have federation enabled.
+    # If false, created portal rooms will never be federated.
+    federate_rooms: true
+    # Settings for backfilling messages from Google Chat.
+    backfill:
+        # Whether or not the Google Chat users of logged in Matrix users should be
+        # invited to private chats when backfilling history from Google Chat. This is
+        # usually needed to prevent rate limits and to allow timestamp massaging.
+        invite_own_puppet: true
+        # Number of threads to backfill in threaded spaces in initial backfill.
+        initial_thread_limit: 10
+        # Number of replies to backfill in each thread in initial backfill.
+        initial_thread_reply_limit: 500
+        # Number of messages to backfill in non-threaded spaces and DMs in initial backfill.
+        initial_nonthread_limit: 100
+        # Number of events to backfill in catchup backfill.
+        missed_event_limit: 5000
+        # How many events to request from Google Chat at once in catchup backfill?
+        missed_event_page_size: 100
+        # If using double puppeting, should notifications be disabled
+        # while the initial backfill is in progress?
+        disable_notifications: false
+
     # Set this to true to tell the bridge to re-send m.bridge events to all rooms on the next run.
     # This field will automatically be changed back to false after it,
     # except if the config file is not writable.
     resend_bridge_info: false
-    # Interval at which to resync contacts (in seconds).
-    periodic_sync: 0
+    # Whether or not unimportant bridge notices should be sent to the bridge notice room.
+    unimportant_bridge_notices: true
+    # Whether or not bridge notices should be disabled entirely.
+    disable_bridge_notices: false
 
-    # Provisioning API part of the web server for automated portal creation and fetching information.
-    # Used by things like mautrix-manager (https://github.com/tulir/mautrix-manager).
-    provisioning:
-        # Whether or not the provisioning API should be enabled.
-        enabled: false
-        # The prefix to use in the provisioning API endpoints.
-        prefix: /_matrix/provision/v1
-        # The shared secret to authorize users of the API.
-        # Set to "generate" to generate and save a new token.
+    # Public website and API configs
+    web:
+        # Auth server config
+        auth:
+            # Publicly accessible base URL for the login endpoints.
+            # The prefix below is not implicitly added. This URL and all subpaths should be proxied
+            # or otherwise pointed to the appservice's webserver to the path specified below (prefix).
+            # This path should usually include a trailing slash.
+            public: https://example.com/login/
+            # Internal prefix in the appservice web server for the login endpoints.
+            prefix: /login
+            # Shared secret for integration managers such as mautrix-manager.
+            # If set to "generate", a random string will be generated on the next startup.
+            # If null, integration manager access to the API will not be possible.
         shared_secret: generate
-
-    # The prefix for commands. Only required in non-management rooms.
-    command_prefix: "!gc"
-
-    # Messages sent upon joining a management room.
-    # Markdown is supported. The defaults are listed below.
-    management_room_text:
-        # Sent when joining a room.
-        welcome: "Hello, I'm a Google Chat bridge bot."
-        # Sent when joining a management room and the user is already logged in.
-        welcome_connected: "Use `help` for help."
-        # Sent when joining a management room and the user is not logged in.
-        welcome_unconnected: "Use `help` for help or `register` to log in."
-        # Optional extra text sent when joining a management room.
-        additional_help: ""
-
-    # Send each message separately (for readability in some clients)
-    management_room_multiple_messages: false
 
     # Permissions for using the bridge.
     # Permitted values:
-    #      relay - Allowed to be relayed through the bridge, no access to commands.
     #       user - Use the bridge with puppeting.
     #      admin - Use and administrate the bridge.
     # Permitted keys:
@@ -218,30 +204,8 @@ bridge:
     #   domain - All users on that homeserver
     #     mxid - Specific user
     permissions:
-        "*": "relay"
         "__BOTUSERS__": "user"
         "__BOTADMIN__": "admin"
-
-    relay:
-        # Whether relay mode should be allowed. If allowed, `!googlechat set-relay` can be used to turn any
-        # authenticated user into a relaybot for that chat.
-        enabled: __ENABLE_RELAYBOT__
-        # The formats to use when sending messages to Google Chat via a relay user.
-        #
-        # Available variables:
-        #   $sender_displayname - The display name of the sender (e.g. Example User)
-        #   $sender_username    - The username (Matrix ID localpart) of the sender (e.g. exampleuser)
-        #   $sender_mxid        - The Matrix ID of the sender (e.g. @exampleuser:example.com)
-        #   $message            - The message content
-        message_formats:
-            m.text: '$sender_displayname: $message'
-            m.notice: '$sender_displayname: $message'
-            m.emote: '* $sender_displayname $message'
-            m.file: '$sender_displayname sent a file'
-            m.image: '$sender_displayname sent an image'
-            m.audio: '$sender_displayname sent an audio file'
-            m.video: '$sender_displayname sent a video'
-            m.location: '$sender_displayname sent a location'
 
 # Python logging configuration.
 #
@@ -268,6 +232,8 @@ logging:
     loggers:
         mau:
             level: __LOG_LEVEL__
+        maugclib:
+            level: INFO
         aiohttp:
             level: INFO
     root:
