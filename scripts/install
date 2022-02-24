@@ -107,6 +107,8 @@ ynh_install_extra_app_dependencies --repo="http://http.debian.net/debian buster-
 #=================================================
 ynh_script_progression --message="Configuring system user..." --weight=1
 
+# Create the dedicated user (if not existing)
+ynh_system_user_create --username=$app
 #=================================================
 # CREATE A POSTGRESQL DATABASE
 #=================================================
